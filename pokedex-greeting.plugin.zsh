@@ -2,6 +2,7 @@
 # ==============================================================================
 # pokedex-greeting.zsh
 # A terminal Pokémon greeting with sprites, type badges, stats, and weaknesses.
+# Automatically switches between side-by-side and stacked layout based on width.
 # ==============================================================================
 
 # Determine directory where this plugin resides
@@ -107,7 +108,6 @@ poke_get_weaknesses() {
 
 # Ensure dependencies (jq and pokeget) are installed
 _pokedex_ensure_deps() {
-    # Check if ~/.cargo/bin has pokeget
     if ! command -v pokeget >/dev/null && [[ -x "$HOME/.cargo/bin/pokeget" ]]; then
         path+=("$HOME/.cargo/bin")
         typeset -U PATH path
@@ -119,31 +119,17 @@ _pokedex_ensure_deps() {
 
     if (( ${#missing[@]} > 0 )); then
         print "\e[1;33m[pokedex-greeting.zsh]\e[0m Missing dependencies: \e[1;37m${(j:, :)missing}\e[0m"
-        for dep in "${missing[@]}"; do
-            case "$dep" in
-                jq)
-                    print "  • \e[1;36mjq\e[0m: Required to parse Pokémon data."
-                    print "    Install: \e[2mbrew install jq\e[0m (macOS) or \e[2msudo apt install jq\e[0m (Linux)"
-                    print "    Repo:    https://jqlang.github.io/jq/"
-                    ;;
-                pokeget)
-                    print "  • \e[1;36mpokeget\e[0m: Required to display Pokémon sprites."
-                    print "    Install: \e[2mcargo install pokeget\e[0m"
-                    print "    Repo:    https://github.com/talwat/pokeget-rs"
-                    ;;
-            esac
-        done
         return 1
     fi
-
     return 0
 }
 
 pokedex_greeting() {
     [[ -t 1 ]] || return
-
-    # Ensure dependencies exist (or attempt auto-install)
     _pokedex_ensure_deps || return
+
+    local term_width="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+    (( term_width < 40 )) && return # Skip if terminal is extremely narrow
 
     local pokedex_file="${POKEDEX_JSON_PATH:-$POKEDEX_PLUGIN_DIR/pokedex.json}"
     [[ -s "$pokedex_file" ]] || return
@@ -185,6 +171,30 @@ pokedex_greeting() {
     done
     [[ -z $weak_badges ]] && weak_badges=$'\e[2mNone\e[0m'
 
+    local sprite_lines=("${(@f)$(pokeget "$id" --hide-name 2>/dev/null)}")
+
+    # Calculate max width of sprite
+    local max_w=0
+    for s in "${sprite_lines[@]}"; do
+        local clean=$(print -rn -- "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
+        local len=${#clean}
+        (( len > max_w )) && max_w=$len
+    done
+
+    # Determine layout mode: Side-by-side requires enough space for sprite + gap + ~50 chars of text
+    local min_side_by_side_width=$(( max_w + 55 ))
+    local use_side_by_side=0
+    (( term_width >= min_side_by_side_width )) && use_side_by_side=1
+
+    # Set description text wrapping width based on active layout
+    local desc_width
+    if (( use_side_by_side )); then
+        desc_width=48
+    else
+        desc_width=$(( term_width - 4 ))
+        (( desc_width > 70 )) && desc_width=70
+    fi
+
     local info_lines=(
         $'\e[1;37m#'"$(printf '%03d' "$id") ${name}"$'\e[0m \e[2m('"Species: ${species}"$')\e[0m'
         $'\e[1;33mType:\e[0m '"${badges}"
@@ -196,43 +206,45 @@ pokedex_greeting() {
     )
 
     while [[ -n $desc ]]; do
-        if [[ ${#desc} -le 48 ]]; then
+        if [[ ${#desc} -le $desc_width ]]; then
             info_lines+=($'\e[3m'"${desc}"$'\e[0m')
             desc=""
         else
-            local chunk="${desc[1,48]}"
+            local chunk="${desc[1,$desc_width]}"
             local last_space="${chunk[(r) ]}"
-            local split_idx=48
+            local split_idx=$desc_width
             [[ -n $last_space ]] && split_idx=${chunk[(I) ]}
             info_lines+=($'\e[3m'"${desc[1,$split_idx-1]}"$'\e[0m')
             desc="${desc[$split_idx+1,-1]}"
         fi
     done
 
-    local sprite_lines=("${(@f)$(pokeget "$id" --hide-name 2>/dev/null)}")
-
-    local max_w=0
-    for s in "${sprite_lines[@]}"; do
-        local clean=$(print -rn -- "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
-        local len=${#clean}
-        (( len > max_w )) && max_w=$len
-    done
-
-    local total_lines=$(( ${#sprite_lines[@]} > ${#info_lines[@]} ? ${#sprite_lines[@]} : ${#info_lines[@]} ))
-
     print
-    for ((i=1; i<=total_lines; i++)); do
-        local s="${sprite_lines[i]:-}"
-        local inf="${info_lines[i]:-}"
-        local clean_s=$(print -rn -- "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
-        local pad=$(( max_w - ${#clean_s} + 4 ))
-        local pad_spaces=$(printf '%*s' "$pad" "")
-        print -r -- "${s}${pad_spaces}${inf}"
-    done
+    if (( use_side_by_side )); then
+        # Side-by-side Layout
+        local total_lines=$(( ${#sprite_lines[@]} > ${#info_lines[@]} ? ${#sprite_lines[@]} : ${#info_lines[@]} ))
+        for ((i=1; i<=total_lines; i++)); do
+            local s="${sprite_lines[i]:-}"
+            local inf="${info_lines[i]:-}"
+            local clean_s=$(print -rn -- "$s" | sed $'s/\x1b\\[[0-9;]*m//g')
+            local pad=$(( max_w - ${#clean_s} + 4 ))
+            local pad_spaces=$(printf '%*s' "$pad" "")
+            print -r -- "${s}${pad_spaces}${inf}"
+        done
+    else
+        # Stacked Layout (Image on top, text below)
+        for s in "${sprite_lines[@]}"; do
+            print -r -- "  ${s}"
+        done
+        print
+        for inf in "${info_lines[@]}"; do
+            print -r -- "  ${inf}"
+        done
+    fi
     print
 }
 
-# Auto-run when sourced in interactive terminal
-if [[ $- == *i* && -t 1 ]]; then
-    pokedex_greeting
-fi
+# # Auto-run when sourced in interactive terminal
+# if [[ $- == *i* && -t 1 ]]; then
+#     pokedex_greeting
+# fi
